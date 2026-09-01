@@ -110,6 +110,11 @@ form.addEventListener('submit', async (e) => {
 
   const fd = new FormData();
   fd.append('file', fileInput.files[0]);
+  // Use a lighter grid for the browser demo so the analysis reliably
+  // finishes within the hosting platform's request time limits, even on
+  // a slow/cold free-tier instance. The API itself still defaults to a
+  // higher-resolution grid (160) when called directly (e.g. via curl).
+  fd.append('grid_resolution', '100');
 
   try {
     const res = await fetch('/analyzeContour', { method: 'POST', body: fd });
