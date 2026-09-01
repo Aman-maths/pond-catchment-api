@@ -74,6 +74,22 @@ const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
 const submitBtn = document.getElementById('submitBtn');
 
+async function waitForServerAwake() {
+  // The free-tier server may be asleep; ping /health repeatedly until it
+  // responds, so the heavy analysis request below always hits an
+  // already-awake server instead of timing out mid-wake-up.
+  const maxAttempts = 20;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const res = await fetch('/health', { cache: 'no-store' });
+      if (res.ok) return true;
+    } catch (e) { /* server still asleep / network hiccup, keep trying */ }
+    statusEl.textContent = 'Waking up the server... (' + (i + 1) + '/' + maxAttempts + ')';
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  return false;
+}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const fileInput = document.getElementById('file');
@@ -81,14 +97,33 @@ form.addEventListener('submit', async (e) => {
 
   submitBtn.disabled = true;
   resultEl.innerHTML = '';
-  statusEl.textContent = 'Analyzing... this can take up to a minute, especially on the first request after the server has been idle.';
+  statusEl.textContent = 'Checking server status...';
+
+  const awake = await waitForServerAwake();
+  if (!awake) {
+    statusEl.textContent = 'The server did not wake up in time. Please wait a moment and try again.';
+    submitBtn.disabled = false;
+    return;
+  }
+
+  statusEl.textContent = 'Analyzing terrain... this can take 20\u201360 seconds, please wait.';
 
   const fd = new FormData();
   fd.append('file', fileInput.files[0]);
 
   try {
     const res = await fetch('/analyzeContour', { method: 'POST', body: fd });
-    const data = await res.json();
+    const rawText = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      statusEl.textContent = 'The server returned an unexpected response (status ' + res.status + '). This can happen if the request took too long. Please try again.';
+      resultEl.innerHTML = '<details id="raw"><summary>Raw server response</summary><pre>' + rawText.replace(/</g, '&lt;').slice(0, 2000) + '</pre></details>';
+      submitBtn.disabled = false;
+      return;
+    }
 
     if (!res.ok || data.status === 'error') {
       statusEl.textContent = 'Error: ' + (data.message || res.statusText);
@@ -114,7 +149,7 @@ form.addEventListener('submit', async (e) => {
     html += `<details id="raw"><summary>View full JSON response</summary><pre>${JSON.stringify(data, null, 2)}</pre></details>`;
     resultEl.innerHTML = html;
   } catch (err) {
-    statusEl.textContent = 'Request failed: ' + err;
+    statusEl.textContent = 'Request failed: ' + err + '. This is often a network/timeout issue on slower connections \u2014 please try again.';
   }
   submitBtn.disabled = false;
 });
