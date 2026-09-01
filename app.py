@@ -12,6 +12,7 @@ Run locally:
     # Server listens on http://0.0.0.0:5000
 
 Endpoints:
+    GET  /                 simple browser upload form (pick a file, get results)
     POST /analyzeContour   (alias: POST /findCatchment)
     GET  /health
 """
@@ -22,7 +23,7 @@ import os
 import tempfile
 import traceback
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 
 from pondcatchment import analyze
 
@@ -30,6 +31,97 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB upload cap
 
 ALLOWED_EXTENSIONS = {".kml", ".kmz"}
+
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pond Catchment Analysis</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #1b1b1b; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: #555; margin-top: 0; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-top: 20px; }
+  input[type=file] { display: block; margin: 12px 0; }
+  button { background: #1b1b1b; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; font-size: 15px; cursor: pointer; }
+  button:disabled { background: #999; cursor: default; }
+  #status { margin-top: 14px; font-size: 14px; color: #444; }
+  table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+  td, th { border: 1px solid #ddd; padding: 8px 10px; text-align: left; font-size: 14px; }
+  th { background: #fafafa; width: 45%; }
+  #raw { margin-top: 18px; }
+  #raw summary { cursor: pointer; font-size: 13px; color: #555; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; border: 1px solid #eee; padding: 12px; border-radius: 6px; font-size: 12px; max-height: 400px; overflow: auto; }
+</style>
+</head>
+<body>
+  <h1>Pond Catchment Analysis</h1>
+  <p class="sub">Upload a contour map (.kml or .kmz) to get a recommended pond location and catchment information.</p>
+
+  <div class="card">
+    <form id="form">
+      <input type="file" id="file" name="file" accept=".kml,.kmz" required>
+      <button type="submit" id="submitBtn">Analyze</button>
+    </form>
+    <div id="status"></div>
+    <div id="result"></div>
+  </div>
+
+<script>
+const form = document.getElementById('form');
+const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('result');
+const submitBtn = document.getElementById('submitBtn');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fileInput = document.getElementById('file');
+  if (!fileInput.files.length) return;
+
+  submitBtn.disabled = true;
+  resultEl.innerHTML = '';
+  statusEl.textContent = 'Analyzing... this can take up to a minute, especially on the first request after the server has been idle.';
+
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+
+  try {
+    const res = await fetch('/analyzeContour', { method: 'POST', body: fd });
+    const data = await res.json();
+
+    if (!res.ok || data.status === 'error') {
+      statusEl.textContent = 'Error: ' + (data.message || res.statusText);
+      submitBtn.disabled = false;
+      return;
+    }
+
+    statusEl.textContent = 'Done.';
+    const site = data.recommended_pond_site;
+    const loc = site.pond_location;
+    let html = '<table>';
+    html += `<tr><th>Recommended pond location</th><td>${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)} (elev ${loc.elevation_m.toFixed(1)} m)</td></tr>`;
+    html += `<tr><th>Catchment area</th><td>${site.catchment_area_hectares.toFixed(2)} ha (${site.catchment_area_m2.toFixed(0)} m&sup2;)</td></tr>`;
+    html += `<tr><th>Mean catchment slope</th><td>${site.terrain_stats.mean_slope_percent.toFixed(1)} %</td></tr>`;
+    html += `<tr><th>Catchment relief</th><td>${site.terrain_stats.relief_m.toFixed(1)} m</td></tr>`;
+    if (site.pond_sizing_estimate) {
+      html += `<tr><th>Pond surface area (2 m depth)</th><td>${site.pond_sizing_estimate.pond_surface_area_hectares.toFixed(2)} ha</td></tr>`;
+      html += `<tr><th>Estimated storage volume</th><td>${site.pond_sizing_estimate.estimated_storage_volume_m3.toFixed(0)} m&sup3;</td></tr>`;
+    }
+    html += `<tr><th>Estimated annual inflow</th><td>${site.hydrology_estimate.estimated_annual_runoff_volume_m3.toFixed(0)} m&sup3;/yr</td></tr>`;
+    html += `<tr><th>Alternative sites returned</th><td>${data.candidate_sites.length}</td></tr>`;
+    html += '</table>';
+    html += `<details id="raw"><summary>View full JSON response</summary><pre>${JSON.stringify(data, null, 2)}</pre></details>`;
+    resultEl.innerHTML = html;
+  } catch (err) {
+    statusEl.textContent = 'Request failed: ' + err;
+  }
+  submitBtn.disabled = false;
+});
+</script>
+</body>
+</html>
+"""
 
 
 def _float_arg(form, key, default):
@@ -40,6 +132,11 @@ def _float_arg(form, key, default):
 def _int_arg(form, key, default):
     val = form.get(key, None)
     return int(val) if val not in (None, "") else default
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return Response(INDEX_HTML, mimetype="text/html")
 
 
 @app.route("/health", methods=["GET"])
