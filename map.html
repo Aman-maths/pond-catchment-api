@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Farm Pond Planner</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css">
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, Arial, sans-serif; }
+  #wrap { display: flex; height: 100%; }
+  #map { flex: 1; }
+  #panel { width: 320px; padding: 16px; overflow-y: auto; background: #f7f9f7; border-left: 1px solid #ccd; box-sizing: border-box; }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  p.hint { font-size: 13px; color: #445; margin: 4px 0 12px; }
+  .card { background: #fff; border: 1px solid #dde; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .card .label { font-size: 12px; color: #667; }
+  .card .value { font-size: 20px; font-weight: 600; }
+  .err { background: #fde8e8; border-color: #f5b5b5; color: #8a1f1f; font-size: 14px; }
+  .busy { font-size: 14px; color: #245; }
+  .legend span { display: inline-block; width: 14px; height: 10px; margin-right: 6px; vertical-align: middle; }
+  small { color: #667; }
+  @media (max-width: 700px) { #wrap { flex-direction: column; } #panel { width: auto; height: 42%; border-left: 0; border-top: 1px solid #ccd; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="map"></div>
+  <div id="panel">
+    <h1>Farm Pond Planner</h1>
+    <p class="hint">Use the square or polygon tool (top-left of the map) to select land inside the red box. The pond, catchment and water volume appear on the map.</p>
+    <div id="status"></div>
+    <div id="results"></div>
+    <div class="legend card">
+      <div><span style="background:#d22"></span>Mapped area (you can draw inside)</div>
+      <div><span style="background:#2a7fff"></span>Catchment area</div>
+      <div><span style="background:#00c2c7"></span>Pond surface</div>
+      <div><span style="background:#ff9800"></span>Suggested pond location</div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+const map = L.map('map').setView([20, 78], 5);
+const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 19, attribution: 'Imagery &copy; Esri' }).addTo(map);
+const street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
+L.control.layers({ 'Satellite': sat, 'Street': street }).addTo(map);
+
+const drawn = new L.FeatureGroup().addTo(map);
+const output = new L.FeatureGroup().addTo(map);
+
+map.addControl(new L.Control.Draw({
+  edit: false,
+  draw: { polygon: { allowIntersection: false, shapeOptions: { color: '#ffd400' } },
+          rectangle: { shapeOptions: { color: '#ffd400' } },
+          polyline: false, circle: false, marker: false, circlemarker: false }
+}));
+
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+
+fetch('/region').then(r => r.json()).then(d => {
+  if (d.status !== 'ok') { statusEl.innerHTML = '<div class="card err">' + d.message + '</div>'; return; }
+  const b = d.bbox;
+  const bounds = [[b.min_lat, b.min_lon], [b.max_lat, b.max_lon]];
+  L.rectangle(bounds, { color: '#d22', weight: 2, fill: false }).addTo(map);
+  map.fitBounds(bounds);
+  statusEl.innerHTML = '<small>Max selection: ' + d.max_selection_km2 + ' km&sup2;</small>';
+}).catch(() => { statusEl.innerHTML = '<div class="card err">Cannot reach the server.</div>'; });
+
+map.on(L.Draw.Event.CREATED, function (e) {
+  drawn.clearLayers();
+  output.clearLayers();
+  resultsEl.innerHTML = '';
+  drawn.addLayer(e.layer);
+  const pts = e.layer.getLatLngs()[0].map(p => [p.lng, p.lat]);
+  statusEl.innerHTML = '<div class="card busy">Analysing your land... please wait.</div>';
+
+  fetch('/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ polygon: pts }) })
+    .then(r => r.json().then(j => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+      if (!ok || j.status !== 'ok') {
+        statusEl.innerHTML = '<div class="card err">' + (j.message || 'Something went wrong.') + '</div>';
+        return;
+      }
+      show(j);
+    })
+    .catch(() => { statusEl.innerHTML = '<div class="card err">Cannot reach the server.</div>'; });
+});
+
+const ll = a => a.map(p => [p[1], p[0]]);
+const fmt = (n, d = 0) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d });
+
+function show(j) {
+  const site = j.recommended_pond_site;
+  const vol = j.water_volume_summary;
+
+  // other candidate sites (small grey markers)
+  (j.candidate_sites || []).slice(1).forEach(c => {
+    L.circleMarker([c.pond_location.lat, c.pond_location.lon],
+      { radius: 6, color: '#fff', weight: 2, fillColor: '#888', fillOpacity: 0.9 })
+      .bindTooltip('Alternative site #' + c.rank + ': ' + fmt(c.catchment_area_hectares, 1) + ' ha catchment')
+      .addTo(output);
+  });
+
+  // catchment
+  const cp = L.polygon(ll(site.catchment_boundary_lonlat),
+    { color: '#2a7fff', weight: 2, fillColor: '#2a7fff', fillOpacity: 0.2 }).addTo(output);
+  cp.bindTooltip('Catchment: ' + fmt(site.catchment_area_hectares, 1) + ' ha<br>Water per year: ' + fmt(vol.collectable_m3) + ' m&sup3;',
+    { permanent: true, direction: 'center', className: 'lbl' });
+
+  // pond surface
+  const pb = site.pond_sizing_estimate.pond_boundary_lonlat;
+  if (pb && pb.length > 2) {
+    L.polygon(ll(pb), { color: '#00c2c7', weight: 2, fillColor: '#00c2c7', fillOpacity: 0.6 }).addTo(output);
+  }
+
+  // pond marker
+  L.circleMarker([site.pond_location.lat, site.pond_location.lon],
+    { radius: 9, color: '#fff', weight: 3, fillColor: '#ff9800', fillOpacity: 1 })
+    .bindTooltip('Suggested pond location').addTo(output);
+
+  map.fitBounds(cp.getBounds().pad(0.2));
+
+  statusEl.innerHTML = '<small>Selected ' + j.selection.area_km2 + ' km&sup2;' + (j.cached ? ' (from cache)' : '') +
+                       ' &middot; computed in ' + j.processing_time_seconds + ' s</small>';
+  resultsEl.innerHTML =
+    card('Suggested pond location', site.pond_location.lat.toFixed(5) + ', ' + site.pond_location.lon.toFixed(5)) +
+    card('Catchment area', fmt(site.catchment_area_hectares, 1) + ' ha (' + fmt(site.catchment_area_m2) + ' m&sup2;)') +
+    card('Water you can collect per year', fmt(vol.collectable_m3) + ' m&sup3;') +
+    '<div class="card"><div class="label">Details</div><small>' +
+    'Yearly rain runoff from catchment: ' + fmt(vol.annual_runoff_m3) + ' m&sup3;<br>' +
+    'Pond holds (' + site.pond_sizing_estimate.mean_water_depth_m.toFixed(1) + ' m mean depth): ' + fmt(vol.pond_storage_m3) + ' m&sup3;<br>' +
+    'Pond surface: ' + fmt(site.pond_sizing_estimate.pond_surface_area_hectares, 2) + ' ha<br>' +
+    'Rainfall used: ' + fmt(site.hydrology_estimate.annual_rainfall_mm_used) + ' mm/yr, runoff coefficient ' + site.hydrology_estimate.runoff_coefficient_used +
+    '<br>Collectable = the smaller of runoff and pond storage.</small></div>';
+}
+function card(label, value) {
+  return '<div class="card"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>';
+}
+</script>
+<style>.lbl{background:rgba(255,255,255,.9);border:1px solid #2a7fff;font-weight:600;text-align:center}</style>
+</body>
+</html>
